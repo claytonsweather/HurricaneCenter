@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LiveTime Hurricane Center</title>
+
+<style>
+:root{
+  --bg1:#081523;
+  --bg2:#0f2740;
+  --card:rgba(255,255,255,0.06);
+  --border:rgba(255,255,255,0.1);
+  --text:#e8f3ff;
+  --muted:#9db4cc;
+  --accent:#5dd7ff;
+}
+
+body{
+  margin:0;
+  font-family:Segoe UI, sans-serif;
+  background:linear-gradient(180deg,var(--bg1),var(--bg2));
+  color:var(--text);
+}
+
+.app{
+  max-width:1300px;
+  margin:auto;
+  padding:20px;
+}
+
+.header{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  margin-bottom:20px;
+}
+
+h1{
+  margin:0;
+  font-size:28px;
+}
+
+.status{
+  font-size:14px;
+  color:var(--muted);
+}
+
+.btn{
+  background:linear-gradient(135deg,#5dd7ff,#00a6d6);
+  border:none;
+  padding:10px 16px;
+  border-radius:10px;
+  color:white;
+  cursor:pointer;
+}
+
+.grid{
+  display:grid;
+  grid-template-columns: 1fr 2fr;
+  gap:20px;
+}
+
+.panel{
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:18px;
+  padding:16px;
+  backdrop-filter:blur(12px);
+}
+
+/* Storm list */
+.storm{
+  padding:12px;
+  border-radius:12px;
+  margin-bottom:10px;
+  background:rgba(255,255,255,0.05);
+  cursor:pointer;
+}
+
+.storm:hover{
+  background:rgba(93,215,255,0.15);
+}
+
+/* Map */
+svg{
+  width:100%;
+  height:450px;
+  background:linear-gradient(#0b4a7a,#081b32);
+  border-radius:14px;
+}
+
+/* Responsive */
+@media(max-width:900px){
+  .grid{
+    grid-template-columns:1fr;
+  }
+}
+</style>
+</head>
+
+<body>
+
+<div class="app">
+
+<div class="header">
+  <h1>🌪️ Live Hurricane Center</h1>
+  <div>
+    <button class="btn" id="refreshBtn">Refresh</button>
+    <div class="status" id="statusText">Loading...</div>
+  </div>
+</div>
+
+<div class="grid">
+
+<!-- Storm List -->
+<div class="panel">
+  <h3>Active Systems</h3>
+  <div id="stormList"></div>
+</div>
+
+<!-- Map -->
+<div class="panel">
+  <h3>Storm Map</h3>
+  <svg id="stormMap" viewBox="0 0 900 460"></svg>
+</div>
+
+</div>
+
+</div>
+
+<script>
+
+/* ===== SAME WORKING BACKEND ===== */
+const FEEDS = [
+  { key:"atlantic", url:"https://www.nhc.noaa.gov/gis-at.xml", color:"#5dd7ff" },
+  { key:"eastpac", url:"https://www.nhc.noaa.gov/gis-ep.xml", color:"#ffb55e" }
+];
+
+async function fetchWithTimeout(url, timeout=8000){
+  const controller=new AbortController();
+  const id=setTimeout(()=>controller.abort(),timeout);
+  try{
+    const res=await fetch(url,{signal:controller.signal});
+    if(!res.ok) throw new Error();
+    return await res.text();
+  } finally { clearTimeout(id); }
+}
+
+function sources(url){
+  return [
+    url,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    `https://corsproxy.io/?${encodeURIComponent(url)}`
+  ];
+}
+
+async function fetchFeed(url){
+  for(const s of sources(url)){
+    try{
+      const t=await fetchWithTimeout(s);
+      if(t.includes("<rss")) return t;
+    }catch{}
+  }
+  throw new Error("feed fail");
+}
+
+function getText(node,tag){
+  const el=node.querySelector(tag) ||
+    node.querySelector(`*[local-name()='${tag}']`);
+  return el?el.textContent.trim():"";
+}
+
+function parseFeed(text,feed){
+  const xml=new DOMParser().parseFromString(text,"text/xml");
+  const items=[...xml.getElementsByTagName("item")];
+
+  const storms=[];
+
+  items.forEach(item=>{
+    const title=getText(item,"title");
+    if(!title.toLowerCase().includes("summary")) return;
+
+    const name=getText(item,"name") || "Storm";
+    const center=getText(item,"center");
+
+    let lat=null,lon=null;
+    if(center){
+      const m=center.match(/(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
+      if(m){ lat=+m[1]; lon=+m[2]; }
+    }
+
+    storms.push({name,lat,lon,color:feed.color});
+  });
+
+  return storms;
+}
+
+/* ===== MAP ===== */
+function scaleLon(lon){ return ((lon+180)/360)*900; }
+function scaleLat(lat){ return 460-((lat+90)/180)*460; }
+
+/* ===== RENDER ===== */
+function render(storms){
+  const list=document.getElementById("stormList");
+  const map=document.getElementById("stormMap");
+
+  list.innerHTML="";
+  map.innerHTML="";
+
+  storms.forEach(s=>{
+    list.innerHTML+=`<div class="storm">${s.name}</div>`;
+
+    if(s.lat && s.lon){
+      const x=scaleLon(s.lon);
+      const y=scaleLat(s.lat);
+
+      map.innerHTML+=`
+        <circle cx="${x}" cy="${y}" r="8" fill="${s.color}" />
+        <text x="${x+10}" y="${y}" fill="white">${s.name}</text>
+      `;
+    }
+  });
+}
+
+/* ===== LOAD ===== */
+async function load(){
+  statusText.textContent="Loading...";
+
+  try{
+    const results=await Promise.all(
+      FEEDS.map(async f=>{
+        const text=await fetchFeed(f.url);
+        return parseFeed(text,f);
+      })
+    );
+
+    const storms=results.flat();
+    render(storms);
+
+    statusText.textContent=`Loaded ${storms.length} systems`;
+
+  }catch{
+    statusText.textContent="Feed error";
+  }
+}
+
+refreshBtn.onclick=load;
+load();
+
+</script>
+
+</body>
+</html>
